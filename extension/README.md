@@ -59,11 +59,18 @@ manages its own host and auto-loads the extension on startup.
 npm run package                   # -> strudelton-0.1.0.ablx, then install it into Live
 ```
 
-## Verify the Strudel engine without Live
+## Verify without Live
 
 ```bash
-npm run smoke                     # bundles + runs the engine in Node, prints per-cycle notes
+npm run smoke      # bundles + runs the Strudel engine in Node, prints per-cycle notes
+npm run verify     # builds the .ablx, then pre-flights it: structure, manifest, loads the entry,
+                   # mocks the Extension Host to run activate() (registers commands/menus), and
+                   # drives a real bake through the packaged worker.cjs.
 ```
+
+`npm run verify` catches packaging bugs (missing files), a broken manifest, and load/activate/
+worker errors. It can't check Live-only behavior (the managed-host `spawn`, real clip writes, the
+modal webview) — install the `.ablx` once to confirm those.
 
 ## Architecture: Strudel runs in a child process
 
