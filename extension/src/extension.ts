@@ -22,9 +22,10 @@ import {
   MidiClip,
 } from "@ableton-extensions/sdk";
 import { spawn } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { BakedNote } from "../../src/bake.mjs";
-import interfaceHtml from "../ui/interface.html";
 
 const API_VERSION = "1.0.0";
 
@@ -84,12 +85,25 @@ export function activate(activation: ActivationContext) {
   // user dismissed it without baking.
   async function openEditor(initial: EditorState): Promise<EditorState | null> {
     const injected = JSON.stringify(initial).replace(/</g, "\\u003c"); // keep </script> from breaking the HTML
-    // Function replacer so `$` in a pattern (e.g. Strudel's `$:` stacks) isn't treated as a
-    // special replacement token. The placeholder appears exactly once in the HTML.
-    const html = interfaceHtml.replace("__STRUDELTON_INITIAL__", () => injected);
+    // dist/editor.html is assembled at build time (CodeMirror UI inlined). Inject the initial
+    // state into its single placeholder. Function replacer so `$` in a pattern (Strudel's `$:`
+    // stacks) isn't treated as a special replacement token.
+    const shell = readFileSync(join(__dirname, "editor.html"), "utf8");
+    const html = shell.replace("__STRUDELTON_INITIAL_JSON__", () => injected);
+    // ~500kb (CodeMirror inlined) — too big for a comfortable data: URL, so write to the
+    // extension's temp dir and open via file://. Fall back to data: if no temp dir.
+    let url: string;
+    const tempDir = context.environment.tempDirectory;
+    if (tempDir) {
+      const path = join(tempDir, "strudelton-editor.html");
+      writeFileSync(path, html);
+      url = pathToFileURL(path).href;
+    } else {
+      url = `data:text/html,${encodeURIComponent(html)}`;
+    }
     let result: string;
     try {
-      result = await context.ui.showModalDialog(`data:text/html,${encodeURIComponent(html)}`, 620, 460);
+      result = await context.ui.showModalDialog(url, 720, 520);
     } catch {
       return null; // dismissed / closed without baking
     }

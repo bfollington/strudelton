@@ -31,18 +31,8 @@
         gap: 8px;
       }
       header .dot { color: var(--accent); }
-      #code {
-        flex: 1;
-        width: 100%;
-        resize: none;
-        border: none;
-        outline: none;
-        padding: 12px;
-        background: var(--bg);
-        color: var(--text);
-        font: 13px/1.5 ui-monospace, Menlo, monospace;
-        tab-size: 2;
-      }
+      #editor { flex: 1; overflow: hidden; }
+      .cm-editor { height: 100%; }
       footer {
         display: flex;
         align-items: center;
@@ -72,55 +62,26 @@
         cursor: pointer;
       }
       button:active { transform: translateY(1px); }
-      button.secondary {
-        background: transparent;
-        color: var(--text);
-        border: 1px solid var(--border);
-      }
+      button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
     </style>
   </head>
   <body>
     <header><span class="dot">🌀</span> Strudel → MIDI</header>
-    <textarea id="code" spellcheck="false" autocomplete="off"></textarea>
+    <div id="editor"></div>
     <footer>
       <label>Bars <input id="bars" type="number" min="1" max="64" step="1" /></label>
-      <span class="hint">cycles of the pattern baked into the clip</span>
+      <span class="hint">cycles baked into the clip · ⌘↵ to bake</span>
       <span class="spacer"></span>
       <button id="cancel" class="secondary">Cancel</button>
-      <button id="bake">Bake ⌘↵</button>
+      <button id="bake">Bake</button>
     </footer>
+    <!-- The extension replaces the token below with { code, bars } before opening. -->
     <script>
-      // The token below is replaced by the extension with { code, bars } before opening.
-      const INITIAL = __STRUDELTON_INITIAL__;
-      const $ = (id) => document.getElementById(id);
-
-      function send(message) {
-        if (window.webkit?.messageHandlers?.live) {
-          window.webkit.messageHandlers.live.postMessage(message);
-        } else if (window.chrome?.webview) {
-          window.chrome.webview.postMessage(message);
-        }
-      }
-      // close_and_send is the ONLY way the webview can close the dialog; for Cancel we send a
-      // sentinel the extension treats as a no-op.
-      function bake() {
-        const code = $("code").value;
-        const bars = Math.max(1, Math.min(64, parseInt($("bars").value, 10) || 1));
-        send({ method: "close_and_send", params: [JSON.stringify({ code, bars })] });
-      }
-      function cancel() {
-        send({ method: "close_and_send", params: [JSON.stringify({ cancel: true })] });
-      }
-
-      $("code").value = INITIAL.code || "";
-      $("bars").value = INITIAL.bars || 4;
-      $("bake").addEventListener("click", bake);
-      $("cancel").addEventListener("click", cancel);
-      document.addEventListener("keydown", (e) => {
-        if ((e.metaKey || e.ctrlKey) && e.key === "Enter") bake();
-        else if (e.key === "Escape") cancel();
-      });
-      $("code").focus();
+      window.__strudeltonInitial = __STRUDELTON_INITIAL_JSON__;
+    </script>
+    <!-- build.ts inlines the bundled CodeMirror editor here. -->
+    <script>
+      /*__EDITOR_BUNDLE__*/
     </script>
   </body>
 </html>
