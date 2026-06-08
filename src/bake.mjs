@@ -150,13 +150,16 @@ function valueToProbability(v) {
  * @param {number} [cfg.beatsPerCycle=4]
  * @param {number} [cfg.defaultVelocity=100]
  * @param {Object<string,number>} [cfg.drumMap] - extra/override drum-name→MIDI entries.
- * @returns {{notes: Array, skipped: number}} notes + count of haps that couldn't map to a pitch
+ * @returns {{notes: Array, skipped: number, ignoredControls: string[]}} notes, count of haps that
+ *   couldn't map to a pitch, and the sorted control names present but not used by the MIDI bake
+ *   (audio/sound controls like speed/lpf/room — evaluated but dropped, by design).
  */
 export function hapsToNotes(haps, baseCycle, cfg = {}) {
   const beatsPerCycle = cfg.beatsPerCycle ?? 4;
   const defaultVelocity = cfg.defaultVelocity ?? 100;
   const drumMap = cfg.drumMap ? { ...DEFAULT_DRUM_MAP, ...cfg.drumMap } : DEFAULT_DRUM_MAP;
   const notes = [];
+  const ignored = new Set();
   let skipped = 0;
 
   for (const hap of haps) {
@@ -167,6 +170,10 @@ export function hapsToNotes(haps, baseCycle, cfg = {}) {
     if (pitch === null || pitch < 0 || pitch > 127) {
       skipped++;
       continue;
+    }
+    // Note which controls the user set that the MIDI bake doesn't consume (sound-engine only).
+    if (hap.value && typeof hap.value === 'object') {
+      for (const k of Object.keys(hap.value)) if (!CONSUMED_CONTROLS.has(k)) ignored.add(k);
     }
     const note = {
       pitch,
@@ -179,8 +186,13 @@ export function hapsToNotes(haps, baseCycle, cfg = {}) {
     if (prob !== null && prob < 1) note.probability = prob;
     notes.push(note);
   }
-  return { notes, skipped };
+  return { notes, skipped, ignoredControls: [...ignored].sort() };
 }
+
+// Controls the bake actually uses (pitch / velocity / probability). Everything else a pattern
+// sets (speed, lpf, room, pan, delay, …) is sound-engine only and dropped — we surface those
+// names so the editor can flag them instead of silently ignoring them.
+const CONSUMED_CONTROLS = new Set(['note', 'n', 's', 'velocity', 'gain', 'prob', 'chance']);
 
 /**
  * Bake `count` cycles of a pattern starting at `baseCycle` into one note batch,

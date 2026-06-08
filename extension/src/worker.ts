@@ -26,8 +26,8 @@ void (async () => {
     };
     const { evaluatePattern, bakeCycles } = await import("../../src/bake.mjs");
     const { pattern } = await evaluatePattern(req.code);
-    const { notes, skipped } = bakeCycles(pattern, req.baseCycle ?? 0, req.count ?? 1, req.cfg ?? {});
-    process.stdout.write(JSON.stringify({ ok: true, notes, skipped }));
+    const { notes, skipped, ignoredControls } = bakeCycles(pattern, req.baseCycle ?? 0, req.count ?? 1, req.cfg ?? {});
+    process.stdout.write(JSON.stringify({ ok: true, notes, skipped, ignoredControls }));
   } catch (e) {
     const err = e as Error;
     process.stdout.write(

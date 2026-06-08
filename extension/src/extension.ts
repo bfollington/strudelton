@@ -50,6 +50,7 @@ interface EditorState {
 interface BakeResult {
   notes: BakedNote[];
   skipped: number;
+  ignoredControls: string[];
 }
 
 // Run a bake in the clean child Node process. Spawns dist/worker.cjs with the request as base64
@@ -65,14 +66,21 @@ function bakeViaWorker(req: { code: string; baseCycle: number; count: number; cf
     child.stderr.on("data", (d) => (err += d));
     child.on("error", (e) => reject(new Error(`spawn failed: ${e.message}`)));
     child.on("close", () => {
-      let parsed: { ok: boolean; notes?: BakedNote[]; skipped?: number; error?: string; stack?: string };
+      let parsed: {
+        ok: boolean;
+        notes?: BakedNote[];
+        skipped?: number;
+        ignoredControls?: string[];
+        error?: string;
+        stack?: string;
+      };
       try {
         parsed = JSON.parse(out.trim());
       } catch {
         reject(new Error(`worker produced no JSON. stdout=${out.slice(0, 200)} stderr=${err.slice(0, 200)}`));
         return;
       }
-      if (parsed.ok) resolve({ notes: parsed.notes ?? [], skipped: parsed.skipped ?? 0 });
+      if (parsed.ok) resolve({ notes: parsed.notes ?? [], skipped: parsed.skipped ?? 0, ignoredControls: parsed.ignoredControls ?? [] });
       else reject(new Error(`worker error: ${parsed.error}${parsed.stack ? " | " + parsed.stack : ""}`));
     });
   });
@@ -118,13 +126,17 @@ export function activate(activation: ActivationContext) {
 
   // Bake `bars` cycles of `code` into the given slot as a fresh clip of the right length.
   async function bakeIntoSlot(slot: ClipSlot<"1.0.0">, code: string, bars: number): Promise<void> {
-    const { notes, skipped } = await bakeViaWorker({ code, baseCycle: 0, count: bars, cfg: CFG });
+    const { notes, skipped, ignoredControls } = await bakeViaWorker({ code, baseCycle: 0, count: bars, cfg: CFG });
     if (slot.clip) await slot.deleteClip(); // we control the clip length, so recreate
     const clip = await slot.createMidiClip(bars * CFG.beatsPerCycle);
     clip.notes = notes;
     patterns.set(clip.handle.id, { code, bars });
     nextBase.set(clip.handle.id, bars);
-    console.log(`[strudelton] baked ${bars} bar(s) -> ${notes.length} notes` + (skipped ? `, ${skipped} skipped` : ""));
+    console.log(
+      `[strudelton] baked ${bars} bar(s) -> ${notes.length} notes` +
+        (skipped ? `, ${skipped} skipped` : "") +
+        (ignoredControls.length ? `, ignored controls: ${ignoredControls.join(", ")}` : ""),
+    );
   }
 
   // ClipSlot → edit & bake into a fresh clip.
@@ -168,10 +180,13 @@ export function activate(activation: ActivationContext) {
         bars: clampBars(Math.round(clip.duration / CFG.beatsPerCycle)),
       };
       const base = nextBase.get(clip.handle.id) ?? state.bars;
-      const { notes } = await bakeViaWorker({ code: state.code, baseCycle: base, count: state.bars, cfg: CFG });
+      const { notes, ignoredControls } = await bakeViaWorker({ code: state.code, baseCycle: base, count: state.bars, cfg: CFG });
       clip.notes = notes;
       nextBase.set(clip.handle.id, base + state.bars);
-      console.log(`[strudelton] next window [${base}, ${base + state.bars}) -> ${notes.length} notes`);
+      console.log(
+        `[strudelton] next window [${base}, ${base + state.bars}) -> ${notes.length} notes` +
+          (ignoredControls.length ? `, ignored controls: ${ignoredControls.join(", ")}` : ""),
+      );
     } catch (e) {
       console.error("[strudelton] bakeNext failed:", e);
     }

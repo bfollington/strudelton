@@ -71,14 +71,15 @@ async function runPreview() {
   const status = byId("status");
   try {
     const { pattern } = await evaluatePattern(code);
-    const { notes, skipped } = bakeCycles(pattern, 0, bars, CFG);
+    const { notes, skipped, ignoredControls } = bakeCycles(pattern, 0, bars, CFG);
     if (seq !== previewSeq) return;
     const chancy = notes.filter((n) => n.probability !== undefined).length;
     status.textContent =
       `${notes.length} note${notes.length === 1 ? "" : "s"} · ${bars} bar${bars === 1 ? "" : "s"}` +
       (chancy ? ` · ${chancy} chancy` : "") +
-      (skipped ? ` · ${skipped} skipped` : "");
-    status.className = "ok";
+      (skipped ? ` · ${skipped} skipped` : "") +
+      (ignoredControls.length ? `  ⚠ ignored: ${ignoredControls.join(", ")}` : "");
+    status.className = ignoredControls.length ? "warn" : "ok";
     drawRoll(notes, bars);
   } catch (e) {
     if (seq !== previewSeq) return;

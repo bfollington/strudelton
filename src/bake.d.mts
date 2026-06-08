@@ -18,6 +18,7 @@ export interface BakeConfig {
 export interface BakeResult {
   notes: BakedNote[];
   skipped: number;
+  ignoredControls: string[];
 }
 
 /** Strudel Pattern (opaque here — we only call queryArc on it elsewhere). */
