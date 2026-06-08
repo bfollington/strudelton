@@ -76,6 +76,11 @@ Strudel just works. Full write-up in [`../FINDINGS.md`](../FINDINGS.md) §"why a
 
 ## Expression in patterns
 
+- **Scales / keys / chords** — via `@strudel/tonal`: `.scale("C:minor")`, `n("0 2 4").scale(...)`,
+  `<a:minor:pentatonic e:dorian>` (different scale per bar), `.voicing()`, chord symbols.
+- **Drums** — `s("bd sd hh oh")` maps drum names → MIDI notes (GM-aligned, matches Ableton's
+  default Drum Rack: first pad = C1 = 36). Put a Drum Rack on the track. Unknown sound names are
+  skipped (shown in the preview's "N skipped"). Override the map via `cfg.drumMap` in `bake.mjs`.
 - **Velocity** — `.velocity(x)` or `.gain(x)` (0–1) → MIDI velocity 1–127, per note.
 - **Probability** — `.prob(p)` or `.chance(p)` (0–1) → Live's per-note probability. Live re-rolls
   it every loop, so the clip **evolves while it loops** with no re-bake. Example:

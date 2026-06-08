@@ -55,21 +55,53 @@ export async function evaluatePattern(code) {
   return { pattern, meta };
 }
 
+// Strudel/Tidal drum-abbreviation → MIDI note, GM-aligned. Matches Ableton's default Drum Rack,
+// whose first pad is C1 = MIDI 36. Used when a hap has a sound (`s`) but no pitch — so
+// `s("bd sd hh")` targets a Drum Rack. Override/extend per bake via cfg.drumMap.
+export const DEFAULT_DRUM_MAP = {
+  bd: 36, kick: 36, bass: 36,
+  sd: 38, snare: 38, sn: 38,
+  rim: 37, rs: 37, sidestick: 37, st: 37,
+  cp: 39, clap: 39, hc: 39,
+  hh: 42, ch: 42, hat: 42, chh: 42, closedhat: 42,
+  oh: 46, ohh: 46, openhat: 46,
+  ph: 44, pedalhat: 44,
+  lt: 45, lowtom: 45,
+  mt: 47, midtom: 47,
+  ht: 50, hitom: 50, hightom: 50,
+  cr: 49, crash: 49,
+  rd: 51, ride: 51,
+  cb: 56, cowbell: 56,
+  tb: 54, tamb: 54, tambourine: 54,
+  sh: 70, shaker: 70, maracas: 70,
+  cl: 75, claves: 75,
+  perc: 39,
+};
+
+function drumNameToPitch(s, drumMap) {
+  const name = String(s).split(':')[0].trim().toLowerCase(); // s("bd:2") sample variant -> "bd"
+  return Object.prototype.hasOwnProperty.call(drumMap, name) ? drumMap[name] : null;
+}
+
 // --- hap.value → MIDI pitch ------------------------------------------------------
 // Observed value shapes from queryArc (see spikes/explore-haps.mjs):
 //   bare number    : 0            (note("48 52") or mini "48 52" -> direct MIDI number)
 //   note name      : "c3"         (rare as bare; usually wrapped in an object)
 //   controls object: { note: "c3", velocity: 0.9, gain: 0.5, ... }
-//   drum/sound only: { s: "bd" }  (no pitch — unmappable without a drum-name table)
-function valueToPitch(v) {
+//   drum/sound only: { s: "bd" }  -> drum-name table (else skipped)
+function valueToPitch(v, drumMap) {
   if (typeof v === 'number') return Math.round(v);
   if (typeof v === 'string') return safeNoteToMidi(v);
   if (v && typeof v === 'object') {
     if (typeof v.note === 'number') return Math.round(v.note);
     if (typeof v.note === 'string') return safeNoteToMidi(v.note);
+    if (typeof v.s === 'string') {
+      const p = drumNameToPitch(v.s, drumMap); // drum sound -> pad
+      if (p !== null) return p;
+    }
     if (typeof v.n === 'number') return Math.round(v.n); // `n` control fallback
   }
-  return null; // unmappable (e.g. pure {s:"bd"}) — caller skips it
+  return null; // unmappable (e.g. a non-drum sample with no note) — caller skips it
 }
 
 function safeNoteToMidi(name) {
@@ -117,11 +149,13 @@ function valueToProbability(v) {
  * @param {object} cfg
  * @param {number} [cfg.beatsPerCycle=4]
  * @param {number} [cfg.defaultVelocity=100]
+ * @param {Object<string,number>} [cfg.drumMap] - extra/override drum-name→MIDI entries.
  * @returns {{notes: Array, skipped: number}} notes + count of haps that couldn't map to a pitch
  */
 export function hapsToNotes(haps, baseCycle, cfg = {}) {
   const beatsPerCycle = cfg.beatsPerCycle ?? 4;
   const defaultVelocity = cfg.defaultVelocity ?? 100;
+  const drumMap = cfg.drumMap ? { ...DEFAULT_DRUM_MAP, ...cfg.drumMap } : DEFAULT_DRUM_MAP;
   const notes = [];
   let skipped = 0;
 
@@ -129,7 +163,7 @@ export function hapsToNotes(haps, baseCycle, cfg = {}) {
     if (!hap.hasOnset || !hap.hasOnset()) continue; // skip fragments (no `whole`)
     const begin = hap.whole.begin.valueOf();
     const end = hap.whole.end.valueOf();
-    const pitch = valueToPitch(hap.value);
+    const pitch = valueToPitch(hap.value, drumMap);
     if (pitch === null || pitch < 0 || pitch > 127) {
       skipped++;
       continue;
