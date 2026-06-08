@@ -1,10 +1,12 @@
-// Webview editor UI — runs in the modal's browser context (NOT the extension/host). esbuild
-// bundles this (browser/IIFE) and build.ts inlines it into dist/editor.html. CodeMirror lives
-// here. The extension injects the initial { code, bars } as window.__strudeltonInitial.
+// Webview editor UI — runs in the modal's browser context (a real browser, where Strudel works
+// fine). esbuild bundles this (browser/IIFE) and build.ts inlines it into dist/editor.html.
+// Provides CodeMirror + a LIVE preview: on each edit we evaluate the pattern with the SAME
+// bake.mjs the worker uses, so the piano-roll shows exactly what will bake (and surfaces errors).
 import { EditorView, basicSetup } from "codemirror";
 import { keymap } from "@codemirror/view";
 import { javascript } from "@codemirror/lang-javascript";
 import { oneDark } from "@codemirror/theme-one-dark";
+import { evaluatePattern, bakeCycles, type BakedNote } from "../../src/bake.mjs";
 
 interface Initial {
   code: string;
@@ -14,6 +16,7 @@ const initial: Initial = (window as unknown as { __strudeltonInitial?: Initial }
   code: "",
   bars: 4,
 };
+const CFG = { beatsPerCycle: 4, defaultVelocity: 100 };
 
 const w = window as unknown as {
   webkit?: { messageHandlers?: { live?: { postMessage(m: unknown): void } } };
@@ -25,11 +28,11 @@ function send(message: unknown) {
 }
 const byId = (id: string) => document.getElementById(id) as HTMLElement;
 const barsInput = () => byId("bars") as HTMLInputElement;
+const currentBars = () => Math.max(1, Math.min(64, parseInt(barsInput().value, 10) || 1));
 
 // close_and_send is the only way the webview can close the dialog.
 function bake() {
-  const bars = Math.max(1, Math.min(64, parseInt(barsInput().value, 10) || 1));
-  send({ method: "close_and_send", params: [JSON.stringify({ code: view.state.doc.toString(), bars })] });
+  send({ method: "close_and_send", params: [JSON.stringify({ code: view.state.doc.toString(), bars: currentBars() })] });
 }
 function cancel() {
   send({ method: "close_and_send", params: [JSON.stringify({ cancel: true })] });
@@ -43,6 +46,9 @@ const view = new EditorView({
     javascript(),
     oneDark,
     keymap.of([{ key: "Mod-Enter", run: () => (bake(), true) }]),
+    EditorView.updateListener.of((u) => {
+      if (u.docChanged) schedulePreview();
+    }),
     EditorView.theme({
       "&": { height: "100%", fontSize: "13px", backgroundColor: "#2b2b2b" },
       ".cm-scroller": { fontFamily: "ui-monospace, Menlo, monospace" },
@@ -50,10 +56,100 @@ const view = new EditorView({
   ],
 });
 
+// --- live preview --------------------------------------------------------------------------
+let previewTimer = 0;
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(runPreview, 180);
+}
+
+let previewSeq = 0;
+async function runPreview() {
+  const seq = ++previewSeq; // ignore stale results if the user keeps typing
+  const code = view.state.doc.toString();
+  const bars = currentBars();
+  const status = byId("status");
+  try {
+    const { pattern } = await evaluatePattern(code);
+    const { notes, skipped } = bakeCycles(pattern, 0, bars, CFG);
+    if (seq !== previewSeq) return;
+    const chancy = notes.filter((n) => n.probability !== undefined).length;
+    status.textContent =
+      `${notes.length} note${notes.length === 1 ? "" : "s"} · ${bars} bar${bars === 1 ? "" : "s"}` +
+      (chancy ? ` · ${chancy} chancy` : "") +
+      (skipped ? ` · ${skipped} skipped` : "");
+    status.className = "ok";
+    drawRoll(notes, bars);
+  } catch (e) {
+    if (seq !== previewSeq) return;
+    status.textContent = "⚠ " + ((e as Error)?.message ?? String(e)).split("\n")[0];
+    status.className = "err";
+    clearRoll();
+  }
+}
+
+function rollCtx(): { ctx: CanvasRenderingContext2D; W: number; H: number } {
+  const canvas = byId("roll") as HTMLCanvasElement;
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+  canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+  const ctx = canvas.getContext("2d")!;
+  return { ctx, W: canvas.width, H: canvas.height };
+}
+function clearRoll() {
+  const { ctx, W, H } = rollCtx();
+  ctx.clearRect(0, 0, W, H);
+}
+function drawRoll(notes: BakedNote[], bars: number) {
+  const { ctx, W, H } = rollCtx();
+  const dpr = window.devicePixelRatio || 1;
+  ctx.clearRect(0, 0, W, H);
+  if (!notes.length) return;
+
+  const totalBeats = bars * CFG.beatsPerCycle;
+  let minP = Infinity;
+  let maxP = -Infinity;
+  for (const n of notes) {
+    minP = Math.min(minP, n.pitch);
+    maxP = Math.max(maxP, n.pitch);
+  }
+  const range = Math.max(1, maxP - minP);
+  const padY = 4 * dpr;
+  const noteH = 5 * dpr;
+  const usableH = H - 2 * padY - noteH;
+
+  // bar gridlines
+  ctx.strokeStyle = "rgba(255,255,255,0.08)";
+  ctx.lineWidth = 1;
+  for (let b = 0; b <= bars; b++) {
+    const x = Math.round((b / bars) * W) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, H);
+    ctx.stroke();
+  }
+
+  for (const n of notes) {
+    const x = (n.startTime / totalBeats) * W;
+    const wpx = Math.max(2 * dpr, (n.duration / totalBeats) * W - 1);
+    const y = padY + (1 - (n.pitch - minP) / range) * usableH;
+    const vel = (n.velocity ?? 100) / 127;
+    const prob = n.probability ?? 1;
+    ctx.globalAlpha = 0.35 + 0.65 * prob; // chancy notes are dimmer
+    ctx.fillStyle = `rgb(255, ${120 + Math.round(80 * vel)}, 0)`; // brighter with velocity
+    ctx.fillRect(x, y, wpx, noteH);
+  }
+  ctx.globalAlpha = 1;
+}
+
 barsInput().value = String(initial.bars ?? 4);
 byId("bake").addEventListener("click", bake);
 byId("cancel").addEventListener("click", cancel);
+barsInput().addEventListener("input", schedulePreview);
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") cancel();
 });
+window.addEventListener("resize", schedulePreview);
 view.focus();
+runPreview();

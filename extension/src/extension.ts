@@ -103,7 +103,7 @@ export function activate(activation: ActivationContext) {
     }
     let result: string;
     try {
-      result = await context.ui.showModalDialog(url, 720, 520);
+      result = await context.ui.showModalDialog(url, 720, 560);
     } catch {
       return null; // dismissed / closed without baking
     }
