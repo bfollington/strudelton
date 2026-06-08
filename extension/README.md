@@ -74,6 +74,16 @@ JSON from stdout. This is mandatory, not incidental: the Extension Host's V8 is 
 and breaks Strudel's `evalScope` in-process. A normal child `node` has a normal environment, so
 Strudel just works. Full write-up in [`../FINDINGS.md`](../FINDINGS.md) §"why a child process".
 
+## Expression in patterns
+
+- **Velocity** — `.velocity(x)` or `.gain(x)` (0–1) → MIDI velocity 1–127, per note.
+- **Probability** — `.prob(p)` or `.chance(p)` (0–1) → Live's per-note probability. Live re-rolls
+  it every loop, so the clip **evolves while it loops** with no re-bake. Example:
+  `note("c3 e3 g3 b3").prob("1 0.6 0.85 0.5")`. (This is different from `degradeBy`, which drops
+  notes deterministically when baked.)
+- **MPE / continuous expression** is not possible — the SDK note API has no pitch-bend / pressure /
+  note-expression / real-time MIDI (see [`../FINDINGS.md`](../FINDINGS.md) §"Expression ceiling").
+
 ## Notes / known constraints
 
 - Loop markers are read-only after clip creation, so "Bake next window" overwrites notes in place

@@ -76,8 +76,11 @@ real-time MIDI out anywhere in the SDK** (grep for `pitchbend|aftertouch|pressur
 expression|timbre|cc|automation` → 0 hits). The SDK edits the Set's data model, it is not a MIDI
 engine — so **MPE / continuous expression cannot be baked**, regardless of how expressively Strudel
 describes it. Same class of ceiling as the missing transport: that's the real-time engine work this
-probe skips. Upside: `probability` *is* writable per note and Live re-rolls it each loop, so mapping
-a Strudel construct to it could make a clip evolve while looping without re-baking (future mapping).
+probe skips. Upside: `probability` *is* writable per note and Live re-rolls it each loop —
+**implemented**: a custom `.prob(p)`/`.chance(p)` control (registered in `bake.mjs`) attaches a
+per-note probability (0–1) that maps to `NoteDescription.probability`, so a baked clip evolves while
+it loops with no re-bake — the closest thing to "alive" without a transport read. (Distinct from
+`degradeBy`, which drops haps deterministically at bake time.)
 
 ### Q4 — Clip length / loop. **POSITIVE (one constraint).**
 - Set length at creation: `clipSlot.createMidiClip(beatsPerCycle)` → one-cycle clip. The

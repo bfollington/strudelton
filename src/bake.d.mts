@@ -7,6 +7,7 @@ export interface BakedNote {
   startTime: number;
   duration: number;
   velocity: number;
+  probability?: number; // from .prob()/.chance(); omitted when 1 (Live default)
 }
 
 export interface BakeConfig {

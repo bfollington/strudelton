@@ -29,8 +29,14 @@ import { evaluate } from '@strudel/transpiler';
 let _scopeReady = null;
 export function loadStrudel() {
   if (!_scopeReady) {
+    // Custom control: `.prob(p)` / `.chance(p)` (0–1) attaches a per-note probability we map to
+    // Live's NoteDescription.probability. Live re-rolls it every loop, so a baked clip evolves
+    // while looping with no re-bake — the closest we get to "alive" without a transport read.
+    // (Unlike `degradeBy`, which drops haps deterministically at bake time.) registerControl
+    // patches Pattern.prototype.{prob,chance} and returns the standalone control fns.
+    const probControls = core.registerControl('prob', 'chance');
     // To add scales later: also pass `import * as tonal from '@strudel/tonal'`.
-    _scopeReady = evalScope(core, mini);
+    _scopeReady = evalScope(core, mini, probControls);
   }
   return _scopeReady;
 }
@@ -86,6 +92,16 @@ function valueToVelocity(v, defaultVel = 100) {
 
 const clampInt = (n, lo, hi) => Math.max(lo, Math.min(hi, n | 0));
 
+// --- hap.value → Live per-note probability (0–1) ---------------------------------
+// From the `.prob()`/`.chance()` control registered in loadStrudel. Returns null when absent
+// so the caller can leave probability at Live's default (1 = always plays).
+function valueToProbability(v) {
+  if (v && typeof v === 'object' && typeof v.prob === 'number') {
+    return Math.max(0, Math.min(1, v.prob));
+  }
+  return null;
+}
+
 /**
  * Pure mapping: haps → SDK NoteDescription[]. The single function the whole probe
  * pivots on; testable without Ableton.
@@ -115,12 +131,16 @@ export function hapsToNotes(haps, baseCycle, cfg = {}) {
       skipped++;
       continue;
     }
-    notes.push({
+    const note = {
       pitch,
       startTime: (begin - baseCycle) * beatsPerCycle,
       duration: (end - begin) * beatsPerCycle,
       velocity: valueToVelocity(hap.value, defaultVelocity),
-    });
+    };
+    // Only set probability when explicitly < 1, so default-probability notes stay clean.
+    const prob = valueToProbability(hap.value);
+    if (prob !== null && prob < 1) note.probability = prob;
+    notes.push(note);
   }
   return { notes, skipped };
 }
