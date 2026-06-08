@@ -28,8 +28,11 @@ import interfaceHtml from "../ui/interface.html";
 
 const API_VERSION = "1.0.0";
 
-// Showcases per-note probability: Live re-rolls each loop, so the clip evolves while looping.
-const DEFAULT_PATTERN = 'note("c3 e3 g3 b3 a3 g3 e3 d3").prob("1 0.6 0.85 0.5 1 0.7 0.4 0.9")';
+// Showcases per-note velocity (accents) + probability (Live re-rolls each loop → evolving clip).
+const DEFAULT_PATTERN =
+  'note("c3 e3 g3 b3 a3 g3 e3 d3")\n' +
+  '  .velocity("1 0.6 0.8 0.6 0.9 0.6 0.8 0.6")\n' +
+  '  .prob("1 0.7 0.9 0.5 1 0.7 0.5 0.8")';
 const DEFAULT_BARS = 4;
 const CFG = { beatsPerCycle: 4, defaultVelocity: 100 };
 
