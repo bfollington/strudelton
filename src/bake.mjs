@@ -22,6 +22,7 @@
 import { evalScope, noteToMidi } from '@strudel/core';
 import * as core from '@strudel/core';
 import * as mini from '@strudel/mini';
+import * as tonal from '@strudel/tonal';
 import { evaluate } from '@strudel/transpiler';
 
 // evalScope must run once before evaluate() so transpiled source can see the Strudel
@@ -35,8 +36,10 @@ export function loadStrudel() {
     // (Unlike `degradeBy`, which drops haps deterministically at bake time.) registerControl
     // patches Pattern.prototype.{prob,chance} and returns the standalone control fns.
     const probControls = core.registerControl('prob', 'chance');
-    // To add scales later: also pass `import * as tonal from '@strudel/tonal'`.
-    _scopeReady = evalScope(core, mini, probControls);
+    // @strudel/tonal adds scale/key snapping, chords, and voicings (`.scale("C:minor")`,
+    // `n("0 2 4").scale(...)`, `.voicing()`, etc.). It emits note-name values that map cleanly
+    // to MIDI via noteToMidi.
+    _scopeReady = evalScope(core, mini, tonal, probControls);
   }
   return _scopeReady;
 }
