@@ -1,0 +1,16 @@
+node_modules/
+**/node_modules/
+dist/
+*.log
+*.ablx
+*.tsbuildinfo
+.env
+.DS_Store
+
+# The Ableton Extensions SDK is CONFIDENTIAL pre-release material under a license that
+# forbids redistributing "the SDK or parts of it outside of your application" and bars
+# disclosure to third parties. Keep the whole vendored SDK + the raw zip OUT of git.
+# (Each developer drops their own copy in locally; the extension's package.json points at
+# the .tgz under vendor/sdk/.) The compiled .ablx — your application — is fine to share.
+vendor/
+extensions-sdk-*.zip
