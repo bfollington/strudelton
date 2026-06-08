@@ -69,6 +69,16 @@ notified of cycle/loop boundaries.
 - Undo grouping: `context.withinTransaction(fn)` (sync callback; nested collapse). Individual
   mutations are already undoable.
 
+**Expression ceiling — velocity YES, MPE NO.** `NoteDescription` (above) is the *entire* per-note
+surface. `velocity` works (Strudel `.velocity()`/`.gain()` 0–1 → 1–127, verified). But there is
+**no per-note pitch-bend, pressure/aftertouch, timbre/slide, note-expression envelope, CC, or
+real-time MIDI out anywhere in the SDK** (grep for `pitchbend|aftertouch|pressure|mpe|note-
+expression|timbre|cc|automation` → 0 hits). The SDK edits the Set's data model, it is not a MIDI
+engine — so **MPE / continuous expression cannot be baked**, regardless of how expressively Strudel
+describes it. Same class of ceiling as the missing transport: that's the real-time engine work this
+probe skips. Upside: `probability` *is* writable per note and Live re-rolls it each loop, so mapping
+a Strudel construct to it could make a clip evolve while looping without re-baking (future mapping).
+
 ### Q4 — Clip length / loop. **POSITIVE (one constraint).**
 - Set length at creation: `clipSlot.createMidiClip(beatsPerCycle)` → one-cycle clip. The
   created session clip's length is the loop. ✅

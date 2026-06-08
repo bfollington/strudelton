@@ -11,6 +11,7 @@ const common = {
   sourcesContent: false,
   logLevel: "info" as const,
   sourcemap: !production,
+  loader: { ".html": "text" as const }, // import the webview UI as a string
 };
 
 // The extension (loaded by Live's Extension Host). Thin: spawns the worker for Strudel work.
