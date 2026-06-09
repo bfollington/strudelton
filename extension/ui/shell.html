@@ -21,6 +21,7 @@
         font: 13px/1.4 -apple-system, system-ui, sans-serif;
         display: flex;
         flex-direction: column;
+        position: relative;
       }
       header {
         padding: 8px 12px;
@@ -31,6 +32,7 @@
         gap: 8px;
       }
       header .dot { color: var(--accent); }
+      header .spacer { flex: 1; }
       #editor { flex: 1; overflow: hidden; min-height: 80px; }
       .cm-editor { height: 100%; }
       #preview {
@@ -75,10 +77,61 @@
       }
       button:active { transform: translateY(1px); }
       button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+      button.ghost {
+        background: transparent;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 3px 9px;
+        font-size: 11px;
+        font-weight: 600;
+        opacity: 0.8;
+      }
+      button.ghost:hover { opacity: 1; border-color: var(--accent); }
+
+      /* ---- cheat sheet overlay ---- */
+      #cheatsheet {
+        position: absolute;
+        inset: 0;
+        z-index: 10;
+        background: var(--panel);
+        overflow: auto;
+        padding: 10px 16px 28px;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      #cheatsheet[hidden] { display: none; }
+      #cheatsheet h2 { font-size: 13px; margin: 2px 0 8px; }
+      #cheatsheet h3 {
+        color: var(--accent);
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin: 14px 0 4px;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 3px;
+      }
+      #cheatsheet .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0 22px; align-items: start; }
+      #cheatsheet .row { margin: 3px 0; }
+      #cheatsheet code {
+        background: var(--input);
+        color: #ffd9a0;
+        padding: 1px 5px;
+        border-radius: 3px;
+        font: 11px ui-monospace, Menlo, monospace;
+      }
+      #cheatsheet .note { opacity: 0.65; }
+      #cheatsheet .warn { color: #e8c06a; }
+      #cheatsheet .no { color: #ff8a8a; }
+      #cheatsheet #help-close { position: sticky; top: 0; float: right; }
     </style>
   </head>
   <body>
-    <header><span class="dot">🌀</span> Strudel → MIDI</header>
+    <header>
+      <span class="dot">🌀</span> Strudel → MIDI
+      <span class="spacer"></span>
+      <button id="help" class="ghost" title="What works in Strudel here" aria-expanded="false">? cheatsheet</button>
+    </header>
     <div id="editor"></div>
     <div id="preview">
       <canvas id="roll"></canvas>
@@ -91,10 +144,59 @@
       <button id="cancel" class="secondary">Cancel</button>
       <button id="bake">Bake</button>
     </footer>
-    <!-- The extension replaces the token below with { code, bars } before opening. -->
-    <script>
-      window.__strudeltonInitial = __STRUDELTON_INITIAL_JSON__;
-    </script>
+
+    <div id="cheatsheet" hidden>
+      <button id="help-close" class="ghost">✕ close</button>
+      <h2>🌀 What bakes here — Strudel → Ableton MIDI</h2>
+      <div class="cols">
+        <div>
+          <h3>Pitch &amp; octave</h3>
+          <div class="row"><code>note("c3 e3 g3")</code> — note names or MIDI numbers 0–127</div>
+          <div class="row warn">⚠ Strudel <code>c4</code> = Ableton's “C3” (Strudel octave numbers run one higher). <code>note("c4")</code> lands on Ableton's middle C.</div>
+          <div class="row no">✗ <code>.octave(n)</code> is ignored here — shift with <code>.add(note(12))</code>.</div>
+
+          <h3>Scales &amp; keys</h3>
+          <div class="row"><code>n("0 1 2 3 4 5 6 7").scale("C:major")</code> → C…C (degree 7 = next octave)</div>
+          <div class="row note">default octave 3 (= Ableton “C2”). Raise: <code>scale("C4:major")</code> or <code>.add(note(12))</code></div>
+          <div class="row">per-bar key: <code>n("0 2 4").scale("&lt;C:major A:minor&gt;")</code></div>
+          <div class="row note">modes: <code>D:dorian</code>, <code>C:minor:pentatonic</code>, …</div>
+          <div class="row warn">⚠ <code>n(…)</code> with no <code>.scale()</code> = raw low MIDI — always add a scale.</div>
+
+          <h3>Chords</h3>
+          <div class="row">stack: <code>note("c,e,g")</code> · <code>n("0,2,4").scale("C:major")</code></div>
+          <div class="row">voiced symbols: <code>chord("Cm7").voicing()</code> · <code>"&lt;C^7 Dm7 G7&gt;".voicing()</code></div>
+
+          <h3>Arpeggios</h3>
+          <div class="row"><code>chord("C").voicing().arp("0 1 2 1")</code> — numeric indices on a voiced chord</div>
+          <div class="row">by hand: <code>n("0 2 4 2").scale("C:major")</code></div>
+          <div class="row no">✗ named <code>.arp("up")</code> bakes nothing — use indices</div>
+        </div>
+        <div>
+          <h3>Transpose</h3>
+          <div class="row">octave <code>.add(note(12))</code> · semitones <code>.add(note(7))</code> · <code>.transpose(7)</code></div>
+          <div class="row no">✗ bare <code>.add(12)</code> is a no-op — wrap in <code>note()</code></div>
+
+          <h3>Velocity &amp; probability → MIDI</h3>
+          <div class="row"><code>.velocity(0.8)</code> / <code>.gain(0.8)</code> (0–1 → 1–127)</div>
+          <div class="row"><code>.prob(0.7)</code> / <code>.chance(0.7)</code> (0–1) — Live re-rolls each loop, so the clip evolves as it plays</div>
+
+          <h3>Drums</h3>
+          <div class="row"><code>s("bd sd hh oh")</code> → Drum Rack pads (GM: bd = C1 = 36). Put a Drum Rack on the track.</div>
+
+          <h3>Rhythm (mini-notation)</h3>
+          <div class="row"><code>a*2</code> <code>a/2</code> <code>~</code> rest <code>a@3</code> hold <code>a!2</code> repeat <code>[a b]</code> <code>&lt;a b&gt;</code> per-cycle <code>a(3,8)</code> euclid</div>
+          <div class="row"><code>.fast(2)</code> <code>.slow(2)</code> <code>.rev()</code> <code>.jux(rev)</code> <code>.every(4, fast(2))</code> <code>.degradeBy(.3)</code></div>
+
+          <h3>Bakes notes only — sound controls dropped <span class="note">(preview flags “⚠ ignored”)</span></h3>
+          <div class="row note"><code>.lpf()</code> <code>.cutoff()</code> <code>.room()</code> <code>.delay()</code> <code>.speed()</code> <code>.pan()</code> <code>.crush()</code> — do sound design on the Ableton track</div>
+
+          <h3 class="no">Not possible (no SDK API)</h3>
+          <div class="row note">MPE · per-note pitch-bend · pressure · continuous automation</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Initial { code, bars } arrives via the URL fragment (#<encoded JSON>); see ui/editor.ts. -->
     <!-- build.ts inlines the bundled CodeMirror editor here. -->
     <script>
       /*__EDITOR_BUNDLE__*/

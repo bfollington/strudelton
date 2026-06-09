@@ -2,12 +2,14 @@
 //
 // It unzips the archive, validates the manifest, loads the entry, simulates the Extension Host
 // (a mock ActivationContext) to confirm `activate` registers its commands + context-menu actions,
-// and then INVOKES a command so the packaged worker.cjs actually bakes a pattern and the notes
-// flow back through a mocked clip write. It also sanity-checks editor.html.
+// and then drives the managed-safe note path: a mocked modal returns notes (as the real webview
+// would), and we assert they are written to a clip through the SDK. It also sanity-checks the
+// bundled editor.html.
 //
-// What it canNOT check (Live only): the managed-host process.execPath spawn, real clip mutation,
-// and the modal webview rendering. Those still need a real install. But this catches packaging
-// bugs (missing files), a broken manifest, load/activate errors, and a broken worker pipeline.
+// What it canNOT check (Live only): the real webview rendering + Strudel bake, and real clip
+// mutation. The Strudel engine itself is covered headlessly by `npm run smoke`. Together they catch
+// packaging bugs (missing files), a broken manifest, load/activate errors, and a broken note-write
+// path — leaving only the genuinely Live-only behavior for a one-time install check.
 import { readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -60,15 +62,15 @@ await check("manifest.json valid + required fields", () => {
   return `${manifest.name} v${manifest.version}, entry=${manifest.entry}`;
 });
 
-// 3. required files present (entry + the worker/editor this extension needs at runtime)
+// 3. required files: the entry + the bundled editor.html the modal loads via file://.
+//    (No worker.cjs — Strudel runs in the webview now, not a child process.)
 const entryPath = join(extractDir, manifest.entry);
-const workerPath = join(extractDir, "dist/worker.cjs");
 const editorPath = join(extractDir, "dist/editor.html");
-await check("entry + worker.cjs + editor.html all bundled", () => {
-  for (const [label, p] of [["entry", entryPath], ["worker.cjs", workerPath], ["editor.html", editorPath]]) {
-    assert(existsSync(p), `${label} missing from archive (${p})`);
-  }
-  return "4 files";
+await check("entry + editor.html bundled (and no stale worker.cjs)", () => {
+  assert(existsSync(entryPath), `entry missing from archive (${entryPath})`);
+  assert(existsSync(editorPath), `editor.html missing from archive (${editorPath})`);
+  assert(!existsSync(join(extractDir, "dist/worker.cjs")), "stale worker.cjs is still bundled");
+  return "entry + editor.html";
 });
 
 // 4. load the entry exactly as a CJS loader would, and grab activate
@@ -84,20 +86,36 @@ await check("entry loads + exports activate()", () => {
   return "loaded clean";
 });
 
-// 5. simulate the Host: call activate with a mock ActivationContext, confirm registrations.
+// 5. simulate the Host: activate with a mock ActivationContext, confirm registrations. The mocked
+//    modal returns notes the way the real webview would (close_and_send payload).
 const registered = new Map(); // commandId -> callback
 const menus = []; // { scope, title, commandId }
-const captured = { notes: null }; // notes written via the mocked clip
+const captured = { notes: null };
+
+// Notes the "webview" returns — a realistic NoteDescription[] (origin/engine is smoke's job).
+const bakedNotes = [
+  { pitch: 48, startTime: 0, duration: 1, velocity: 127 },
+  { pitch: 52, startTime: 1, duration: 1, velocity: 89, probability: 0.7 },
+  { pitch: 55, startTime: 2, duration: 1, velocity: 114 },
+  { pitch: 59, startTime: 3, duration: 1, velocity: 76, probability: 0.5 },
+];
+const modalResult = JSON.stringify({ code: 'note("c3 e3 g3 b3")', bars: 2, notes: bakedNotes });
+
 await check("activate() registers commands + context-menu actions", () => {
   const dataModelBase = {
     getRoot: () => ({ id: 0n }),
-    getObjectIsOfClass: (h, cls) => (h.id === 0n ? cls === "Application" : cls === "MidiClip"),
+    // 0n -> Application, 7n -> the ClipSlot we invoke with, everything else -> a created MidiClip.
+    getObjectIsOfClass: (h, cls) =>
+      h.id === 0n ? cls === "Application" : h.id === 7n ? cls === "ClipSlot" : cls === "MidiClip",
     getObjectCanonicalParent: () => null,
     withinTransaction: (f) => f(),
     clipGetStartTime: () => 0,
     clipGetEndTime: () => 16, // duration 16 beats -> 4 bars
-    midiclipSetNotes: (_h, notes) => {
-      captured.notes = notes;
+    clipslotGetClip: () => null, // empty slot
+    clipslotDeleteClip: (_h, onResult) => onResult && onResult(),
+    clipslotCreateMidiClip: (_h, _len, onResult) => onResult({ id: 99n }),
+    midiclipSetNotes: (_h, n) => {
+      captured.notes = n;
     },
   };
   const api = {
@@ -110,7 +128,7 @@ await check("activate() registers commands + context-menu actions", () => {
         menus.push({ scope, title, commandId });
         onSuccess(() => Promise.resolve());
       },
-      showModalDialog: () => {},
+      showModalDialog: (_url, _w, _h, onResult) => onResult(modalResult),
       showProgressDialog: () => {},
     },
   };
@@ -121,31 +139,32 @@ await check("activate() registers commands + context-menu actions", () => {
   return `${registered.size} commands, ${menus.length} menu actions (${menus.map((m) => m.scope).join("/")})`;
 });
 
-// 6. drive a real bake: invoke a registered command so the PACKAGED worker.cjs runs.
-await check("invoking a command bakes via the packaged worker.cjs", async () => {
-  const cmd = [...registered.keys()].find((id) => /bakeNext|bake/i.test(id)) ?? [...registered.keys()][0];
+// 6. drive editSlot: the mocked modal returns baked notes; they must reach the (mock) clip.
+await check("invoking editSlot writes the webview's baked notes to a clip", async () => {
+  const cmd = [...registered.keys()].find((id) => /editSlot/i.test(id)) ?? [...registered.keys()][0];
   assert(cmd, "no command to invoke");
-  await registered.get(cmd)({ id: 1n }); // a mock MidiClip handle
+  await registered.get(cmd)({ id: 7n }); // a mock ClipSlot handle
   const n = captured.notes;
   assert(Array.isArray(n) && n.length > 0, "no notes were written to the (mock) clip");
+  assert(n.length === bakedNotes.length, `expected ${bakedNotes.length} notes, wrote ${n.length}`);
   const ok = n.every((x) => Number.isInteger(x.pitch) && x.pitch >= 0 && x.pitch <= 127 && typeof x.startTime === "number");
   assert(ok, "baked notes have invalid shape");
-  return `${cmd} -> ${n.length} notes (pitches ${n.slice(0, 6).map((x) => x.pitch).join(" ")}…)`;
+  return `${cmd} -> ${n.length} notes (pitches ${n.map((x) => x.pitch).join(" ")})`;
 });
 
 // 7. editor.html sanity
-await check("editor.html is assembled (CodeMirror + init placeholder)", () => {
+await check("editor.html is assembled (CodeMirror + bundle inlined)", () => {
   const html = readFileSync(editorPath, "utf8");
   assert(/EditorView|cm-editor|codemirror/i.test(html), "no CodeMirror in editor.html");
-  assert(html.includes("__STRUDELTON_INITIAL_JSON__"), "init placeholder missing (extension injects it at runtime)");
   assert(!html.includes("/*__EDITOR_BUNDLE__*/"), "editor bundle was not inlined");
+  assert(!html.includes("__STRUDELTON_INITIAL_JSON__"), "stale injection placeholder still present");
   return `${(html.length / 1024).toFixed(0)}kb`;
 });
 
 if (extractDir) rmSync(extractDir, { recursive: true, force: true });
 console.log(
   failures === 0
-    ? "\n✅ .ablx verified (structure, manifest, activate, worker bake, editor). Live-only: managed-host spawn + real clip write still need an install.\n"
+    ? "\n✅ .ablx verified (structure, manifest, activate, note-write path, editor). Live-only: the real webview bake + clip mutation still need an install.\n"
     : `\n❌ ${failures} check(s) failed.\n`,
 );
 process.exit(failures === 0 ? 0 : 1);

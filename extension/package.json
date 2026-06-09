@@ -11,7 +11,7 @@
     "build": "tsc --noEmit && tsc -p ui/tsconfig.json && tsx build.ts --production",
     "build:dev": "tsc --noEmit && tsc -p ui/tsconfig.json && tsx build.ts",
     "start": "npm run build:dev && extensions-cli run",
-    "package": "npm run build && extensions-cli package . --include dist/worker.cjs --include dist/editor.html",
+    "package": "npm run build && extensions-cli package . --include dist/editor.html",
     "verify": "npm run package && node verify-ablx.mjs",
     "smoke": "tsx build.ts && node dist/bundle-smoke.cjs"
   },

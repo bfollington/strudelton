@@ -17,11 +17,12 @@ is the recommended pivot.
 |---|---|---|
 | M0 headless spike | ✅ done | `spikes/m0-headless.mjs` transpiles → queryArc → notes; evolution shown |
 | M1 derisk SDK | ✅ done | four questions answered below; TS extension builds against SDK `.tgz` |
-| M2 bake extension | ✅ **WORKING IN LIVE** | right-click a Session clip slot → "Strudel: Create & bake" writes the pattern's notes into a real MIDI clip; "Bake next window" steps the evolution |
-| M3 living window | ❌ blocked | no transport, no persistent webview — pivoted to bake (chosen direction) |
+| M2 bake extension | ✅ **WORKING IN LIVE** | right-click a Session clip slot / MIDI clip → "Strudel: Edit & bake…" opens a CodeMirror+preview modal; Bake writes the pattern's notes into a real MIDI clip. Runs **installed (managed)**, not just Developer Mode. |
+| M3 living window | ❌ blocked | no transport, no persistent webview — pivoted to bake; per-note `probability` gives evolve-while-looping without a clock |
 
-**Chosen direction:** offline bake (option 1), confirmed working in Live 12.4.5b3. The extension is
-a thin client that spawns a **child `node` process** to run Strudel (see §"Why a child process").
+**Chosen direction:** offline bake via a modal editor, confirmed working in Live 12.4.5b3. The
+extension is a thin client (no Strudel, no filesystem, no child process); Strudel runs in the modal
+**webview**, which previews *and* bakes, then returns the notes (see §"Architecture").
 
 ---
 
@@ -95,6 +96,11 @@ it loops with no re-bake — the closest thing to "alive" without a transport re
 
 ## What IS buildable (ranked) — the pivot menu
 
+**Implemented: #2 (modal editor), with the bake running *in the webview* — not a child process
+(see §Architecture). #1's through-composed N-cycle bake is exactly what the editor's "Bars" control
+does. #3 ("bake next window") was dropped: it needs host-side Strudel, which the managed sandbox
+forbids.**
+
 1. **Through-composed N-cycle bake → one long looping clip.** `createMidiClip(N*beatsPerCycle)`
    then `clip.notes = bakeCycles(pattern, 0, N)`. Captures N cycles of Strudel evolution as a
    seamless loop; **tight** (Live plays an ordinary clip). Simplest, 100% supported. Proven
@@ -134,11 +140,12 @@ it loops with no re-bake — the closest thing to "alive" without a transport re
   with zero state advanced.
 - Benign import noise: `cannot use window: not in browser?` then `🌀 @strudel/core loaded 🌀`.
 
-## Architecture — why a child process (the hard-won lesson)
-**Do NOT run Strudel inside the Extension Host process.** We tried (bundle `@strudel/*` into the
-extension and call it in-process) and burned a day on it. The Host runs the extension in a V8 that
-is both **bare** (missing `performance` — `@strudel/core` calls `performance.now()` at load) and,
-fatally, **shared-scope**: Strudel's `evalScope()` injects its entire function library into the
+## Architecture — Strudel runs in the webview (two hard-won lessons)
+
+**Lesson 1 — do NOT run Strudel inside the Extension Host process.** We tried (bundle `@strudel/*`
+into the extension and call it in-process) and burned a day on it. The Host runs the extension in a
+V8 that is both **bare** (missing `performance` — `@strudel/core` calls `performance.now()` at load)
+and, fatally, **shared-scope**: Strudel's `evalScope()` injects its entire function library into the
 eval scope, and in the Host that scope is resolved in a way that makes those injected names collide
 with the bundle's own bindings. Concretely:
 - `@strudel/mini` exports `h` (its raw mini-reify, which feeds its argument to the peg parser).
@@ -149,26 +156,41 @@ with the bundle's own bindings. Concretely:
 - Every targeted fix surfaced the next collision (e.g. pinning `h`→`Fraction` then hit a different
   binding → infinite recursion). It is unwinnable in-process.
 
-None of this happens in a **normal Node process** (every command-line test passed throughout). So:
+**Lesson 2 — a child `node` process works in Developer Mode but NOT when installed.** Our first fix
+ran the bake in a clean child process: `spawn(process.execPath, ['worker.cjs', …])`. That works
+under `extensions-cli run` (Developer Mode), where *we* launch the Host with a normal Node — and it
+fooled us into shipping it. But the **installed / managed Host runs under Node's permission
+sandbox** (`--permission`): `fs` writes are denied (`ERR_ACCESS_DENIED` — the editor's temp-file
+write crashed on the very first managed install) and `process.execPath` is not a Node binary we can
+relaunch. The SDK docs are explicit: extensions may only touch `storageDirectory`/`tempDirectory`,
+and "child processes … must respect the same restrictions." So the child-process design is a
+Developer-Mode-only mirage.
+
+**The answer: run Strudel where a real browser already exists — the modal webview.** The SDK's only
+UI surface, `showModalDialog(url)`, loads a full browser. We were already running Strudel there for
+the live piano-roll preview; now the **bake happens there too**. No host-side Strudel, no child
+process, no filesystem:
 
 ```
-Extension Host (thin client, ~35 kb, NO Strudel)
-  └─ spawn(process.execPath, ['dist/worker.cjs', base64(request)])   ← clean child `node`
-        worker.cjs bundles @strudel/* and runs the bake normally
-        → writes { ok, notes, skipped } JSON to stdout  (Strudel's console noise → stderr)
-  ← extension parses stdout, writes notes to the clip via the SDK
+Extension Host (extension.js, ~17 kb min, NO Strudel, no fs, no spawn)
+  └─ showModalDialog( "data:text/html;base64,<editor.html>#<{code,bars}>" )   ← documented pattern
+        editor.html (CodeMirror + @strudel/*) evaluates, previews, and BAKES in the webview
+        → close_and_send( JSON {code, bars, notes} )    ← the one string a modal can return
+  ← extension writes notes to the clip via the SDK (clipSlot.createMidiClip + clip.notes = notes)
 ```
 
-`extension/src/worker.ts` is the worker; `bake.mjs` (plain Strudel) runs there. `extension.ts`'s
-`bakeViaWorker()` spawns it. Latency is a few hundred ms per bake — fine for a manual bake.
-Confirmed: the Host permits `child_process.spawn` + `process.execPath`, and the worker returns
-correct notes that land in a real clip.
+`extension/ui/editor.ts` is the whole Strudel side (preview + bake), bundled into `dist/editor.html`;
+`extension/src/extension.ts` reads that file at runtime, hands it to the modal as a data: URL (initial
+`{code,bars}` in the URL fragment), and writes back the returned notes. Verified end-to-end in a real
+browser (headless Chrome over CDP): a 1.26 MB data: URL loads, seeds from the fragment, previews, and
+the Bake button posts `close_and_send` with correctly-shaped notes (velocity + probability intact).
 
 ### Build toolchain
-`tsc --noEmit && tsx build.ts` (esbuild) emits three CJS bundles: `dist/extension.js` (thin
-client), `dist/worker.cjs` (Strudel engine), `dist/bundle-smoke.cjs` (`npm run smoke`, runs the
-engine in plain Node without Live). `extensions-cli package` makes an installable
-`strudelton-<ver>.ablx`. Only `extensions-cli run` (Developer Mode) needs Ableton.
+`tsc --noEmit && tsx build.ts` (esbuild) emits `dist/extension.js` (thin client, CJS),
+`dist/editor.html` (CodeMirror + Strudel, browser IIFE inlined into the shell), and
+`dist/bundle-smoke.cjs` (`npm run smoke`, runs the engine in plain Node without Live).
+`extensions-cli package . --include dist/editor.html` makes an installable `strudelton-<ver>.ablx`.
+`npm run verify` pre-flights it without Live; `extensions-cli run` (Developer Mode) loads it live.
 
 ### Dead ends (recorded so we don't repeat them)
 - **Environment shims** (polyfill `performance`, `substr`, etc. into the Host): treated the symptom.
@@ -178,29 +200,39 @@ engine in plain Node without Live). `extensions-cli package` makes an installabl
 - Pinning `m`→plain mini / `emitMiniLocations:false` (offset is always emitted; no effect).
 - `vm.createContext` repros are **unfaithful** — copying outer-realm intrinsics into the sandbox
   breaks `instanceof` and produces the same error for the wrong reason.
+- **Child-process worker** (`spawn(process.execPath, ['worker.cjs'])`) — ran Strudel in a clean Node
+  and worked perfectly in Developer Mode, so we shipped it… then the **installed** Host sandboxes
+  Node (permission model): the editor's temp-file write was denied (`ERR_ACCESS_DENIED`) and
+  `process.execPath` isn't a relaunchable Node. **Test installed, not just Developer Mode.** Don't
+  design around host-side `fs`/`child_process` — the webview is the only place a full runtime is
+  guaranteed (it bakes there now; temp-file editor write + worker both deleted).
 
 Lesson: when a browser/full-Node library misbehaves *only* inside an embedded host, isolate it in a
 real child process before shimming the host one missing global at a time.
 
-## How to run it in Live (the one remaining step)
-See `extension/README.md`. Short version: Live 12.4.5+ Suite Beta → Preferences → Extensions →
-enable Developer Mode; `cp extension/.env.example extension/.env` and set `EXTENSION_HOST_PATH`
-to the beta `.app`; `cd extension && npm start`. Then right-click a Session clip slot →
-"Strudel: Create & bake", play it, and right-click the clip → "Strudel: Bake next window" to
-step the evolution. (Or load the `.ablx` directly without Developer Mode.)
+## How to run it in Live
+Two ways (see `extension/README.md`): **(A)** install the packaged `.ablx` (Developer Mode OFF) —
+`cd extension && npm run package`, then add the archive in Preferences → Extensions; **(B)**
+Developer Mode for iteration — `cp extension/.env.example extension/.env`, set `EXTENSION_HOST_PATH`
+to the beta `.app`, `npm start`. Either way: right-click a Session clip slot (or a MIDI clip) →
+"Strudel: Edit & bake…", write a pattern, set bars, Bake.
 
 ## Licensing (two separate copyleft/confidentiality constraints)
 - **Ableton SDK is confidential pre-release material.** Its license forbids distributing
   "the SDK or parts of it outside of your application" and bars disclosure to third parties.
   ⇒ `vendor/` is gitignored; never commit/push the SDK, its docs, `.tgz`, or examples. The
   compiled `.ablx` (your application *using* the SDK) is explicitly OK to distribute.
-- **Strudel is AGPL-3.0** (proposal §8). We bundle `@strudel/*` into the worker (`dist/worker.cjs`),
-  so a public release of the extension must be AGPL-3.0. The pure `src/bake.mjs` boundary stays
-  clean so a future non-Strudel DSL shares nothing copyleft.
+- **Strudel is AGPL-3.0** (proposal §8), so a public release of the extension is AGPL-3.0. `@strudel/*`
+  is bundled **only** into `dist/editor.html` (the webview); the proprietary SDK is bundled **only**
+  into `dist/extension.js`. They stay SEPARATE files — the extension reads editor.html at runtime and
+  hands it to the webview as a data: URL, so the two never link into one binary. (Ableton's own
+  example `import`-inlines its HTML into extension.js; we deliberately don't, to keep the
+  AGPL/proprietary split.) The pure `src/bake.mjs` boundary stays clean for a future non-Strudel DSL.
 
 ## Reusable code
 - `src/bake.mjs` — pure Strudel→`NoteDescription[]` (`evaluatePattern`, `hapsToNotes`,
-  `bakeCycles`). Plain Strudel; runs in any normal Node process (the M0 spike, the smoke harness,
-  and the extension's child worker).
-- `extension/src/worker.ts` — runs `bake.mjs` in the spawned child process; JSON in/out.
+  `bakeCycles`). Plain Strudel; runs anywhere — the M0 spike, the smoke harness (Node), and the
+  modal webview (browser).
+- `extension/ui/editor.ts` — the webview UI: CodeMirror + live piano-roll preview + the bake;
+  bundled into `dist/editor.html`.
 - `spikes/m0-headless.mjs` — M0 demo. `spikes/explore-haps.mjs` — hap-shape probe.

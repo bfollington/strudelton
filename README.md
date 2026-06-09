@@ -6,7 +6,9 @@ live piano-roll preview turns a Strudel pattern into notes in a clip: melodies, 
 velocity, and per-note probability that re-rolls every loop.
 
 > **Status:** a working probe (see [`PROPOSAL.md`](PROPOSAL.md) for the original brief and
-> [`FINDINGS.md`](FINDINGS.md) for what it taught us). Tested in Live 12.4.5 beta in Developer Mode.
+> [`FINDINGS.md`](FINDINGS.md) for what it taught us). Bakes in Live 12.4.5 beta; rearchitected to
+> run sandbox-native (no temp files / no child process) so it targets the **installed/managed** host,
+> not just Developer Mode.
 
 ![editor](docs/editor.png)
 
@@ -15,30 +17,39 @@ velocity, and per-note probability that re-rolls every loop.
 - **Right-click a Session clip slot → "Strudel: Edit & bake…"** — opens the editor; write a pattern,
   set how many **bars** to bake, hit **Bake**. The pattern's notes land in a fresh looping MIDI clip.
 - **Right-click a MIDI clip → "Strudel: Edit & bake…"** — re-open that clip's pattern and re-bake.
-- **Right-click a MIDI clip → "Strudel: Bake next window"** — step the pattern's deterministic
-  evolution forward by N bars (no editor).
 - **Live preview** in the editor: a piano-roll of exactly what will bake, transpile errors inline,
   and a flag for sound-only controls that get dropped (`speed`, `lpf`, …).
+- **Built-in cheat sheet** (the **? cheatsheet** button): what bakes — scales, chords, arps,
+  velocity/probability, drums — plus the Strudel-vs-Ableton octave gotcha and what's ignored.
 
 ### Supported in patterns
 - Full Strudel core + mini-notation, **scales/keys/chords** (`@strudel/tonal`), **drums**
   (`s("bd sd hh")` → Drum Rack), **velocity** (`.velocity()`/`.gain()`), and **probability**
   (`.prob()`/`.chance()` → Live re-rolls each loop).
+- **Chords** as stacks (`note("c,e,g")`) or voiced symbols (`chord("Cm7").voicing()`); **arps** via
+  numeric indices on a voiced chord (`chord("C").voicing().arp("0 1 2 1")`).
+- **Octaves:** Strudel uses scientific pitch — `c4` = Ableton's “C3” (Strudel labels run one octave
+  higher). Shift with `.add(note(12))`; `.octave()` is ignored.
 - Sound-engine controls (`.lpf()`, `.room()`, `.speed()`, …) evaluate but are **dropped** — this
   bakes notes, not sound (do sound design on the Ableton track). The editor flags them.
 - Not possible via the SDK: MPE / per-note pitch-bend / continuous automation (no such API).
 
 ## Architecture (in one breath)
 
-The Extension Host runs a bare, shared-scope V8 that breaks Strudel's `evalScope` in-process, so:
+The Extension Host runs a bare, shared-scope V8 that breaks Strudel in-process, and the *installed*
+Host sandboxes Node (no temp files, no child process). So Strudel runs entirely in the modal webview
+— which already drew the live preview, and now bakes too:
 
 ```
-Extension Host  ──spawn──▶  child `node` (worker.cjs, Strudel)  ──notes JSON──▶  write to clip (SDK)
-  (thin client)            modal editor (editor.html, CodeMirror + Strudel preview, file://)
+Extension Host ──showModalDialog("data:…<editor.html>")──▶ webview: editor.html (CodeMirror+Strudel)
+  (extension.js, ~17 kb,                                     evaluates · previews · BAKES
+   no Strudel / no fs / no spawn)  ◀──close_and_send({code,bars,notes})──┘
+        └─ writes notes to the clip via the SDK (createMidiClip + clip.notes = notes)
 ```
 
-The extension is a thin client; Strudel runs in a clean child process and in the webview. See
-[`FINDINGS.md`](FINDINGS.md) for the full story (and the dead ends).
+The extension is a thin client that only makes SDK calls; all Strudel lives in the webview. See
+[`FINDINGS.md`](FINDINGS.md) for the full story (and the dead ends — including the child process that
+worked in Developer Mode but not when installed).
 
 ## Build & run
 
@@ -75,13 +86,15 @@ SDK's runtime wrapper *inside your application*, which the SDK license explicitl
 
 ## License
 
-**AGPL-3.0** (see [`LICENSE`](LICENSE)) — required because the bake engine links
+**AGPL-3.0** (see [`LICENSE`](LICENSE)) — required because the bake engine is
 [Strudel](https://strudel.cc), which is AGPL-3.0. All of this project's own source is here.
 
 Dependency licenses:
-- `@strudel/*` — **AGPL-3.0** (bundled into `worker.cjs` and `editor.html`).
-- `@ableton-extensions/sdk` — **proprietary** (Ableton; not included; bundled into `extension.js`).
+- `@strudel/*` — **AGPL-3.0** (bundled into `dist/editor.html` only — the webview).
+- `@ableton-extensions/sdk` — **proprietary** (Ableton; not included; bundled into `dist/extension.js` only).
 - CodeMirror, `@tonaljs/tonal`, etc. — permissive (MIT-ish).
 
-Strudel (AGPL) and the Ableton SDK (proprietary) are bundled into **separate** files that only
-communicate across a process/file boundary — they are never linked into one binary.
+Strudel (AGPL) and the Ableton SDK (proprietary) are bundled into **separate files** — `editor.html`
+and `extension.js` — that only communicate across the webview boundary (a data: URL out, a JSON
+string back); they are never linked into one binary. The extension reads `editor.html` at runtime
+rather than `import`-inlining it, precisely to keep that split.

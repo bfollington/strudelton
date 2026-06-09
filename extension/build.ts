@@ -13,8 +13,10 @@ const common = {
   sourcemap: !production,
 };
 
-// The extension (loaded by Live's Extension Host). Thin: spawns the worker for Strudel work,
-// and reads dist/editor.html at runtime for the modal editor.
+// The extension (loaded by Live's Extension Host). It does NO Strudel work and NO filesystem I/O:
+// it points the modal at the bundled editor.html (file://) and writes the notes the webview bakes
+// back into the clip via the SDK. No worker, no temp files, no child_process (the managed host's
+// permission sandbox forbids all three).
 await esbuild.build({
   ...common,
   entryPoints: ["src/extension.ts"],
@@ -22,15 +24,8 @@ await esbuild.build({
   minify: production,
 });
 
-// The Strudel bake worker — runs in a clean child Node process spawned by the extension.
-await esbuild.build({
-  ...common,
-  entryPoints: ["src/worker.ts"],
-  outfile: "dist/worker.cjs",
-  minify: production,
-});
-
-// Standalone smoke harness: proves the bundled Strudel engine runs in a plain Node CJS module.
+// Standalone smoke harness: proves the bundled Strudel engine runs in a plain Node CJS module
+// (the engine the webview runs — verified headlessly here, with no Ableton).
 await esbuild.build({
   ...common,
   entryPoints: ["src/bundle-smoke.ts"],
@@ -38,9 +33,10 @@ await esbuild.build({
   minify: false,
 });
 
-// Webview editor: bundle CodeMirror (browser/IIFE) and inline it into ui/shell.html -> dist/editor.html.
-// The extension reads this file at runtime, injects the initial { code, bars }, and opens it as a
-// modal dialog. CodeMirror runs in the webview (a real browser), not the bare Extension Host.
+// Webview editor: bundle CodeMirror + Strudel (browser/IIFE) and inline it into ui/shell.html ->
+// dist/editor.html. This standalone file is the WHOLE Strudel side: it evaluates the pattern, shows
+// the live piano-roll, AND bakes on demand. The extension only opens it as a modal (file://) and
+// reads back the notes, so Strudel (AGPL) and the SDK (proprietary) stay in SEPARATE files.
 const editor = await esbuild.build({
   bundle: true,
   format: "iife",

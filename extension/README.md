@@ -7,13 +7,16 @@ persistent webview).
 
 ## What it does
 
-- **Right-click a Session clip slot → "Strudel: Create & bake"** — creates a fresh MIDI clip
-  exactly one cycle (4 beats) long and bakes cycle 0 of the pattern into it.
-- **Right-click a MIDI clip → "Strudel: Bake next window"** — advances that clip's window by N
-  cycles and overwrites its notes, so you can step through the pattern's deterministic evolution
-  by hand. (Manual stand-in for the transport clock the SDK can't give us.)
+- **Right-click a Session clip slot → "Strudel: Edit & bake…"** — opens a CodeMirror editor with a
+  live piano-roll; write a pattern, set how many **bars** to bake, hit **Bake**. The notes land in a
+  fresh looping MIDI clip of that length.
+- **Right-click a MIDI clip → "Strudel: Edit & bake…"** — reopens that clip's pattern to re-bake
+  (resizes the clip if you change the bar count).
 
-The pattern is hardcoded in [`src/extension.ts`](src/extension.ts) (`DEFAULT_PATTERN`) for now.
+The default pattern shows velocity (accents) + per-note probability (Live re-rolls it each loop, so
+the clip evolves as it plays). Both menu items run the same modal editor, which has a **? cheatsheet**
+toggle covering what bakes (scales, chords, arps, velocity, probability, drums), the Strudel-vs-Ableton
+octave convention, and what's ignored.
 
 ## Prerequisites
 
@@ -65,21 +68,25 @@ npm run package                   # -> strudelton-0.1.0.ablx, then install it in
 npm run smoke      # bundles + runs the Strudel engine in Node, prints per-cycle notes
 npm run verify     # builds the .ablx, then pre-flights it: structure, manifest, loads the entry,
                    # mocks the Extension Host to run activate() (registers commands/menus), and
-                   # drives a real bake through the packaged worker.cjs.
+                   # drives editSlot end-to-end — a mocked modal returns notes that must reach a clip.
 ```
 
-`npm run verify` catches packaging bugs (missing files), a broken manifest, and load/activate/
-worker errors. It can't check Live-only behavior (the managed-host `spawn`, real clip writes, the
-modal webview) — install the `.ablx` once to confirm those.
+`npm run smoke` exercises the real Strudel engine (the same one the webview runs). `npm run verify`
+catches packaging bugs (missing files), a broken manifest, load/activate errors, and a broken
+note-write path. Neither can render the actual webview or mutate a real clip — install the `.ablx`
+once to confirm those. (The webview bake itself is verified separately against a real browser.)
 
-## Architecture: Strudel runs in a child process
+## Architecture: Strudel runs in the webview
 
-The extension (`dist/extension.js`, ~35 kb, **no Strudel**) is a thin client. On each bake it
-spawns a clean child `node` process running `dist/worker.cjs` (which bundles Strudel + the canonical
-[`../src/bake.mjs`](../src/bake.mjs)), passes the request as base64 JSON, and reads notes back as
-JSON from stdout. This is mandatory, not incidental: the Extension Host's V8 is bare + shared-scope
-and breaks Strudel's `evalScope` in-process. A normal child `node` has a normal environment, so
-Strudel just works. Full write-up in [`../FINDINGS.md`](../FINDINGS.md) §"why a child process".
+The extension (`dist/extension.js`, **no Strudel**, no filesystem, no child process) is a thin client
+that only makes SDK calls. Strudel can't run in the Extension Host (its V8 is bare + shared-scope and
+breaks Strudel's `evalScope`), and the *installed* Host sandboxes Node, so a child process / temp
+files aren't options either. So the bake runs in the **modal webview** — a real browser — which also
+hosts the live preview. `dist/editor.html` bundles CodeMirror + Strudel + the canonical
+[`../src/bake.mjs`](../src/bake.mjs); the extension hands it to `showModalDialog` as a data: URL (read
+at runtime, so editor.html stays a separate file from the proprietary SDK), the webview bakes, and
+`close_and_send` returns `{code, bars, notes}` — which the extension writes to the clip. Full
+write-up + the dead ends in [`../FINDINGS.md`](../FINDINGS.md) §"Architecture".
 
 ## Expression in patterns
 
@@ -98,8 +105,10 @@ Strudel just works. Full write-up in [`../FINDINGS.md`](../FINDINGS.md) §"why a
 
 ## Notes / known constraints
 
-- Loop markers are read-only after clip creation, so "Bake next window" overwrites notes in place
-  and keeps the clip length; it infers N from the clip's current length.
-- A bake spawns a short-lived `node` process (~few hundred ms) — fine for manual baking.
-- `cannot use window: not in browser?` on the worker's startup is a benign Strudel browser-probe
-  (it goes to the worker's stderr; stdout carries only the JSON result).
+- Loop markers are read-only after clip creation, so re-baking a clip recreates it at the new length
+  (delete + `createMidiClip`) rather than moving markers.
+- The editor loads as a ~1.3 MB base64 data: URL (CodeMirror + Strudel inlined). That's the SDK's
+  documented webview mechanism; verified to load + bake in a real browser at that size.
+- No "bake next window" anymore — it needed host-side Strudel, which the managed sandbox forbids.
+  Per-note `.prob()` covers evolving playback; a future "bake next" could be a button in the editor
+  (which has a webview).

@@ -4,28 +4,32 @@
 //   • The proposal's transport-driven "living window" is NOT buildable on Extensions SDK
 //     1.0.0-beta.0 (no playhead/transport read, no persistent webview). This is the supported
 //     alternative: an OFFLINE BAKE driven by context-menu commands + a modal editor.
-//   • Strudel does NOT run in-process: the Extension Host's bare/shared-scope V8 breaks
-//     Strudel's `evalScope`. Instead we spawn a clean child `node` process (dist/worker.cjs)
-//     that runs Strudel normally and returns notes as JSON. The extension is a thin client.
+//   • The installed (managed) Extension Host runs under Node's PERMISSION SANDBOX — no writing
+//     temp files, no spawning a Node binary (`process.execPath` isn't one we can relaunch). So
+//     Strudel runs ENTIRELY IN THE WEBVIEW (a real browser): the modal editor evaluates the
+//     pattern AND bakes it, then returns the notes. This extension does no child_process and no
+//     temp files — it loads the bundled editor.html as a data: URL (the SDK's documented webview
+//     pattern), with the initial { code, bars } in the URL fragment, and writes the returned notes
+//     to a clip via the SDK. editor.html is read at RUNTIME (not `import`-inlined like the SDK's own
+//     example) so it stays a SEPARATE file — keeping Strudel (AGPL) out of the proprietary
+//     extension.js preserves the license boundary (see ../../README.md#License).
 //
 // Commands:
-//   • ClipSlot → "Strudel: Edit & bake…"    — open the editor, bake N bars into a fresh clip.
-//   • MidiClip → "Strudel: Edit & bake…"    — reopen this clip's pattern, re-bake.
-//   • MidiClip → "Strudel: Bake next window" — advance this clip's window by N bars (no editor).
+//   • ClipSlot → "Strudel: Edit & bake…" — open the editor, bake N bars into a fresh clip.
+//   • MidiClip → "Strudel: Edit & bake…" — reopen this clip's pattern, re-bake.
 
 import {
   initialize,
   type ActivationContext,
   type DataModelObject,
   type Handle,
+  type NoteDescription,
   ClipSlot,
   MidiClip,
 } from "@ableton-extensions/sdk";
-import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { BakedNote } from "../../src/bake.mjs";
 
 const API_VERSION = "1.0.0";
 
@@ -37,106 +41,65 @@ const DEFAULT_PATTERN =
 const DEFAULT_BARS = 4;
 const CFG = { beatsPerCycle: 4, defaultVelocity: 100 };
 
-// Per-clip state, keyed by handle.id (bigint). Survives across command invocations because the
-// Extension Host process stays alive. `patterns` = the editable pattern + bar count for a clip;
-// `nextBase` = the next base cycle for "Bake next window".
+// Per-clip pattern state, keyed by handle.id (bigint). Survives across command invocations because
+// the Extension Host process stays alive — lets "edit this clip" reopen the pattern that made it.
 const patterns = new Map<bigint, EditorState>();
-const nextBase = new Map<bigint, number>();
 
 interface EditorState {
   code: string;
   bars: number;
 }
-interface BakeResult {
-  notes: BakedNote[];
-  skipped: number;
-  ignoredControls: string[];
-}
-
-// Run a bake in the clean child Node process. Spawns dist/worker.cjs with the request as base64
-// JSON in argv; the worker writes a JSON result to stdout (console noise -> stderr).
-function bakeViaWorker(req: { code: string; baseCycle: number; count: number; cfg: typeof CFG }): Promise<BakeResult> {
-  return new Promise((resolve, reject) => {
-    const workerPath = join(__dirname, "worker.cjs");
-    const payload = Buffer.from(JSON.stringify(req)).toString("base64");
-    const child = spawn(process.execPath, [workerPath, payload], { stdio: ["ignore", "pipe", "pipe"] });
-    let out = "";
-    let err = "";
-    child.stdout.on("data", (d) => (out += d));
-    child.stderr.on("data", (d) => (err += d));
-    child.on("error", (e) => reject(new Error(`spawn failed: ${e.message}`)));
-    child.on("close", () => {
-      let parsed: {
-        ok: boolean;
-        notes?: BakedNote[];
-        skipped?: number;
-        ignoredControls?: string[];
-        error?: string;
-        stack?: string;
-      };
-      try {
-        parsed = JSON.parse(out.trim());
-      } catch {
-        reject(new Error(`worker produced no JSON. stdout=${out.slice(0, 200)} stderr=${err.slice(0, 200)}`));
-        return;
-      }
-      if (parsed.ok) resolve({ notes: parsed.notes ?? [], skipped: parsed.skipped ?? 0, ignoredControls: parsed.ignoredControls ?? [] });
-      else reject(new Error(`worker error: ${parsed.error}${parsed.stack ? " | " + parsed.stack : ""}`));
-    });
-  });
+// What the webview returns from a bake: the edited pattern plus the notes it computed.
+interface EditorResult extends EditorState {
+  notes: NoteDescription[];
 }
 
 export function activate(activation: ActivationContext) {
   const context = initialize(activation, API_VERSION);
 
-  // Open the modal editor seeded with `initial`; resolves to the edited state, or null if the
-  // user dismissed it without baking.
-  async function openEditor(initial: EditorState): Promise<EditorState | null> {
-    const injected = JSON.stringify(initial).replace(/</g, "\\u003c"); // keep </script> from breaking the HTML
-    // dist/editor.html is assembled at build time (CodeMirror UI inlined). Inject the initial
-    // state into its single placeholder. Function replacer so `$` in a pattern (Strudel's `$:`
-    // stacks) isn't treated as a special replacement token.
-    const shell = readFileSync(join(__dirname, "editor.html"), "utf8");
-    const html = shell.replace("__STRUDELTON_INITIAL_JSON__", () => injected);
-    // ~500kb (CodeMirror inlined) — too big for a comfortable data: URL, so write to the
-    // extension's temp dir and open via file://. Fall back to data: if no temp dir.
-    let url: string;
-    const tempDir = context.environment.tempDirectory;
-    if (tempDir) {
-      const path = join(tempDir, "strudelton-editor.html");
-      writeFileSync(path, html);
-      url = pathToFileURL(path).href;
-    } else {
-      url = `data:text/html,${encodeURIComponent(html)}`;
+  // Build the modal URL. Documented SDK pattern (Essentials → Webviews): load the editor as a
+  // data: URL, with the initial { code, bars } in the URL fragment. We read editor.html at runtime
+  // (rather than `import`-inlining it) so it stays a SEPARATE bundled file — that keeps Strudel
+  // (AGPL) out of the SDK's extension.js (proprietary). Reading our OWN bundled resource needs no
+  // write permission; base64 keeps the encoding compact + predictable.
+  function editorUrl(initial: EditorState): string {
+    const frag = `#${encodeURIComponent(JSON.stringify(initial))}`;
+    const path = join(__dirname, "editor.html");
+    try {
+      const html = readFileSync(path, "utf8");
+      return `data:text/html;base64,${Buffer.from(html, "utf8").toString("base64")}${frag}`;
+    } catch {
+      // Reading our own install dir should be permitted; if some future sandbox denies it, fall
+      // back to file:// (also a supported scheme) so the modal still opens.
+      return `${pathToFileURL(path).href}${frag}`;
     }
+  }
+
+  // Open the modal editor seeded with `initial`; resolves to the baked result, or null if the user
+  // dismissed it without baking.
+  async function openEditor(initial: EditorState): Promise<EditorResult | null> {
     let result: string;
     try {
-      result = await context.ui.showModalDialog(url, 720, 560);
+      result = await context.ui.showModalDialog(editorUrl(initial), 720, 560);
     } catch {
       return null; // dismissed / closed without baking
     }
     try {
-      const parsed = JSON.parse(result) as Partial<EditorState> & { cancel?: boolean };
-      if (parsed.cancel || typeof parsed.code !== "string") return null; // Cancel / Escape
-      return { code: parsed.code, bars: clampBars(parsed.bars ?? DEFAULT_BARS) };
+      const parsed = JSON.parse(result) as Partial<EditorResult> & { cancel?: boolean };
+      if (parsed.cancel || typeof parsed.code !== "string" || !Array.isArray(parsed.notes)) return null;
+      return { code: parsed.code, bars: clampBars(parsed.bars ?? DEFAULT_BARS), notes: parsed.notes };
     } catch {
       return null;
     }
   }
 
-  // Bake `bars` cycles of `code` into the given slot as a fresh clip of the right length.
-  async function bakeIntoSlot(slot: ClipSlot<"1.0.0">, code: string, bars: number): Promise<void> {
-    const { notes, skipped, ignoredControls } = await bakeViaWorker({ code, baseCycle: 0, count: bars, cfg: CFG });
+  // Write the webview's baked notes into the slot as a fresh clip of the right length.
+  async function bakeIntoSlot(slot: ClipSlot<"1.0.0">, result: EditorResult): Promise<void> {
     if (slot.clip) await slot.deleteClip(); // we control the clip length, so recreate
-    const clip = await slot.createMidiClip(bars * CFG.beatsPerCycle);
-    clip.notes = notes;
-    patterns.set(clip.handle.id, { code, bars });
-    nextBase.set(clip.handle.id, bars);
-    console.log(
-      `[strudelton] baked ${bars} bar(s) -> ${notes.length} notes` +
-        (skipped ? `, ${skipped} skipped` : "") +
-        (ignoredControls.length ? `, ignored controls: ${ignoredControls.join(", ")}` : ""),
-    );
+    const clip = await slot.createMidiClip(result.bars * CFG.beatsPerCycle);
+    clip.notes = result.notes;
+    patterns.set(clip.handle.id, { code: result.code, bars: result.bars });
+    console.log(`[strudelton] baked ${result.bars} bar(s) -> ${result.notes.length} notes`);
   }
 
   // ClipSlot → edit & bake into a fresh clip.
@@ -145,7 +108,7 @@ export function activate(activation: ActivationContext) {
       const slot = context.getObjectFromHandle(arg as Handle, ClipSlot);
       const existing = slot.clip instanceof MidiClip ? patterns.get(slot.clip.handle.id) : undefined;
       const edited = await openEditor(existing ?? { code: DEFAULT_PATTERN, bars: DEFAULT_BARS });
-      if (edited) await bakeIntoSlot(slot, edited.code, edited.bars);
+      if (edited) await bakeIntoSlot(slot, edited);
     } catch (e) {
       console.error("[strudelton] editSlot failed:", e);
     }
@@ -165,36 +128,14 @@ export function activate(activation: ActivationContext) {
         bars: clampBars(Math.round(clip.duration / CFG.beatsPerCycle)),
       };
       const edited = await openEditor(initial);
-      if (edited) await bakeIntoSlot(slot, edited.code, edited.bars);
+      if (edited) await bakeIntoSlot(slot, edited);
     } catch (e) {
       console.error("[strudelton] editClip failed:", e);
     }
   });
 
-  // MidiClip → step the window forward by `bars` using the clip's stored pattern (no editor).
-  context.commands.registerCommand("strudelton.bakeNext", async (arg: unknown) => {
-    try {
-      const clip = context.getObjectFromHandle(arg as Handle, MidiClip);
-      const state = patterns.get(clip.handle.id) ?? {
-        code: DEFAULT_PATTERN,
-        bars: clampBars(Math.round(clip.duration / CFG.beatsPerCycle)),
-      };
-      const base = nextBase.get(clip.handle.id) ?? state.bars;
-      const { notes, ignoredControls } = await bakeViaWorker({ code: state.code, baseCycle: base, count: state.bars, cfg: CFG });
-      clip.notes = notes;
-      nextBase.set(clip.handle.id, base + state.bars);
-      console.log(
-        `[strudelton] next window [${base}, ${base + state.bars}) -> ${notes.length} notes` +
-          (ignoredControls.length ? `, ignored controls: ${ignoredControls.join(", ")}` : ""),
-      );
-    } catch (e) {
-      console.error("[strudelton] bakeNext failed:", e);
-    }
-  });
-
   context.ui.registerContextMenuAction("ClipSlot", "Strudel: Edit & bake…", "strudelton.editSlot");
   context.ui.registerContextMenuAction("MidiClip", "Strudel: Edit & bake…", "strudelton.editClip");
-  context.ui.registerContextMenuAction("MidiClip", "Strudel: Bake next window", "strudelton.bakeNext");
 
   console.log("[strudelton] activated — right-click a Session clip slot, or a MIDI clip.");
 }

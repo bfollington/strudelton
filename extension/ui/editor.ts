@@ -1,7 +1,8 @@
 // Webview editor UI — runs in the modal's browser context (a real browser, where Strudel works
 // fine). esbuild bundles this (browser/IIFE) and build.ts inlines it into dist/editor.html.
-// Provides CodeMirror + a LIVE preview: on each edit we evaluate the pattern with the SAME
-// bake.mjs the worker uses, so the piano-roll shows exactly what will bake (and surfaces errors).
+// Provides CodeMirror + a LIVE preview AND the bake itself — both run bake.mjs here in the webview,
+// so the piano-roll shows exactly what will bake, and the Extension Host never runs Strudel (its
+// permission sandbox forbids the temp files + child process a host-side bake would need).
 import { EditorView, basicSetup } from "codemirror";
 import { keymap } from "@codemirror/view";
 import { javascript } from "@codemirror/lang-javascript";
@@ -12,10 +13,18 @@ interface Initial {
   code: string;
   bars: number;
 }
-const initial: Initial = (window as unknown as { __strudeltonInitial?: Initial }).__strudeltonInitial ?? {
-  code: "",
-  bars: 4,
-};
+// The extension passes the initial { code, bars } in the URL fragment (#<encoded JSON>), so the
+// bundled editor.html needs no per-open injection — it stays a fixed, separate file.
+function readInitial(): Initial {
+  try {
+    const frag = location.hash.replace(/^#/, "");
+    if (frag) return JSON.parse(decodeURIComponent(frag)) as Initial;
+  } catch {
+    /* malformed fragment — fall through to the default */
+  }
+  return { code: "", bars: 4 };
+}
+const initial: Initial = readInitial();
 const CFG = { beatsPerCycle: 4, defaultVelocity: 100 };
 
 const w = window as unknown as {
@@ -30,12 +39,32 @@ const byId = (id: string) => document.getElementById(id) as HTMLElement;
 const barsInput = () => byId("bars") as HTMLInputElement;
 const currentBars = () => Math.max(1, Math.min(64, parseInt(barsInput().value, 10) || 1));
 
-// close_and_send is the only way the webview can close the dialog.
-function bake() {
-  send({ method: "close_and_send", params: [JSON.stringify({ code: view.state.doc.toString(), bars: currentBars() })] });
+// Bake HERE in the webview and hand the NOTES back via close_and_send (the only way to close the
+// dialog). The extension just writes them to the clip via the SDK — no child process, no temp file.
+async function bake() {
+  const code = view.state.doc.toString();
+  const bars = currentBars();
+  try {
+    const { pattern } = await evaluatePattern(code);
+    const { notes } = bakeCycles(pattern, 0, bars, CFG);
+    send({ method: "close_and_send", params: [JSON.stringify({ code, bars, notes })] });
+  } catch (e) {
+    // Don't close on a broken pattern — surface the error and let the user fix it.
+    const status = byId("status");
+    status.textContent = "⚠ can't bake: " + ((e as Error)?.message ?? String(e)).split("\n")[0];
+    status.className = "err";
+  }
 }
 function cancel() {
   send({ method: "close_and_send", params: [JSON.stringify({ cancel: true })] });
+}
+// The cheat sheet: a reference of what bakes (and what's ignored / impossible), toggled from the
+// header. It's a static panel in shell.html — this just shows/hides it.
+function toggleHelp(show?: boolean) {
+  const sheet = byId("cheatsheet");
+  const next = show ?? sheet.hidden; // default: flip current state
+  sheet.hidden = !next;
+  byId("help").setAttribute("aria-expanded", String(next));
 }
 
 const view = new EditorView({
@@ -45,7 +74,7 @@ const view = new EditorView({
     basicSetup,
     javascript(),
     oneDark,
-    keymap.of([{ key: "Mod-Enter", run: () => (bake(), true) }]),
+    keymap.of([{ key: "Mod-Enter", run: () => (void bake(), true) }]),
     EditorView.updateListener.of((u) => {
       if (u.docChanged) schedulePreview();
     }),
@@ -147,9 +176,14 @@ function drawRoll(notes: BakedNote[], bars: number) {
 barsInput().value = String(initial.bars ?? 4);
 byId("bake").addEventListener("click", bake);
 byId("cancel").addEventListener("click", cancel);
+byId("help").addEventListener("click", () => toggleHelp());
+byId("help-close").addEventListener("click", () => toggleHelp(false));
 barsInput().addEventListener("input", schedulePreview);
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") cancel();
+  if (e.key !== "Escape") return;
+  // Escape closes the cheat sheet if it's open; otherwise it cancels the dialog.
+  if (!byId("cheatsheet").hidden) toggleHelp(false);
+  else cancel();
 });
 window.addEventListener("resize", schedulePreview);
 view.focus();

@@ -14,11 +14,11 @@
 //   2. Scales / `.scale()` / voicings live in @strudel/tonal, not core. Numeric and
 //      note-name patterns work with core+mini alone; scale-degree patterns need tonal.
 
-// IMPORTANT: run this in a NORMAL Node process only — the M0 spike, the smoke harness, and (in
-// the extension) a child `node` process the extension spawns. Do NOT import it into the Ableton
-// extension's own process: the Extension Host's bare/shared-scope V8 breaks Strudel's `evalScope`
-// (mini's `h` clobbers core's `Fraction`, etc.). In a normal Node process none of that happens —
-// this is just plain Strudel. See FINDINGS.md §"Why a child process".
+// IMPORTANT: run this in a real browser or a NORMAL Node process — the modal webview (where the
+// extension bakes), the M0 spike, and the smoke harness all qualify. Do NOT run it inside the
+// Ableton Extension Host's own process: that V8 is bare/shared-scope and breaks Strudel's
+// `evalScope` (mini's `h` clobbers core's `Fraction`, etc.). A normal browser/Node has none of
+// that — this is just plain Strudel. See FINDINGS.md §"Architecture".
 import { evalScope, noteToMidi } from '@strudel/core';
 import * as core from '@strudel/core';
 import * as mini from '@strudel/mini';
