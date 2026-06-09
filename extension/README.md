@@ -59,7 +59,7 @@ Only needed when you want the extension installed permanently or handed to someo
 manages its own host and auto-loads the extension on startup.
 
 ```bash
-npm run package                   # -> strudelton-0.1.0.ablx, then install it into Live
+npm run package                   # -> strudelton-0.2.0.ablx, then install it into Live
 ```
 
 ## Verify without Live
